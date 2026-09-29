@@ -1,12 +1,16 @@
 # Shipyard
 
-A deployment control plane: **Next.js UI → Go control plane → Bash executor →
-Linux hosts** (git, systemd, nginx, journalctl).
+A **deployment control plane**: Next.js UI → Go control plane → Bash executor →
+Linux hosts (git, systemd, nginx, journald).
 
 > **Shipyard is a write-ahead intent ledger plus a single serial Bash executor.**
 > Postgres records what we *meant* to do. The target host's filesystem and
 > systemd record what is *actually true*. Reconciliation is the self-healing gap
 > between them. The UI, API, and state machine are read models over that gap.
+
+**This repo is currently documentation only.** All code is written by hand, by
+one person, guided step by step. There is no `db/`, no `internal/`, no
+`cmd/` yet — and that is deliberate.
 
 ---
 
@@ -14,15 +18,13 @@ Linux hosts** (git, systemd, nginx, journalctl).
 
 | Document | What it is |
 |---|---|
-| **[`docs/ROADMAP.md`](docs/ROADMAP.md)** | **The build plan.** Six phases, each ending in something you can *run*. This is the authoritative order of work. |
-| [`docs/MENTAL-MODEL.md`](docs/MENTAL-MODEL.md) | **Why.** The canonical design and the 12 adjudications that settled the arguments. |
-| [`research_notes/…/VERIFIED.md`](research_notes/Shipyard%20build%20primitives/VERIFIED.md) | **Proven facts.** Empirically tested on PostgreSQL 18.6 or confirmed against authoritative docs. Wins over recollection. |
-| [`docs/data-architecture.md`](docs/data-architecture.md) | The schema spec (DB layer). |
-| [`docs/backend-design.md`](docs/backend-design.md) | API and engine design (Go layer). |
-| `research_notes/Shipyard build primitives/` | Five deep-dive research notes (SSH, Postgres, SSE, nginx/systemd, secrets). |
+| **[`docs/ROADMAP.md`](docs/ROADMAP.md)** | **The build plan.** Six phases, each ending in something you can *run*. Authoritative order of work. |
+| [`docs/MENTAL-MODEL.md`](docs/MENTAL-MODEL.md) | **Why.** The canonical design: the three status axes, the 12 adjudications that settled the arguments, the executor constraints. |
+| [`reference/Shipyard build primitives/VERIFIED.md`](reference/Shipyard%20build%20primitives/VERIFIED.md) | **Proven facts.** Empirically tested on PostgreSQL 18.6 or confirmed against authoritative docs. Wins over recollection. |
+| [`reference/README.md`](reference/README.md) | The research library, and why certain files were deleted. |
 
-Rule of precedence: **`VERIFIED.md` > `MENTAL-MODEL.md` > `ROADMAP.md` > the raw
-analyses in `docs/`.** Where they disagree, the higher one wins.
+**Precedence:** `VERIFIED.md` > `MENTAL-MODEL.md` > `ROADMAP.md` > deep dives.
+Where they disagree, the higher one wins.
 
 ---
 
@@ -48,8 +50,7 @@ is a control panel and a ledger over a deploy that actually works.
 
 ## The three status axes (the crux)
 
-These are orthogonal and are the single most common source of bugs. Do not merge
-them:
+Orthogonal, and the single most common source of bugs. Do not merge them:
 
 | Axis | Question | Source of truth |
 |---|---|---|
@@ -59,8 +60,16 @@ them:
 
 ---
 
+## The lab
+
+The target host is **this machine** — it already runs systemd 262 and nginx
+1.30.5, and `sshd` is active. No Docker-based lab is used: containers need
+`--privileged` and a cgroup dance, and they would teach container-systemd
+quirks that real VMs do not have. The engine reaches the target over real SSH
+to `localhost`, so the code works unchanged when later pointed at a VPS.
+
+---
+
 ## Status
 
-Pre-implementation. The schema (`db/migrations/`) has **not** been written — the
-draft that existed was analysed, rejected, and quarantined under
-`db/migrations/_discarded/` with the reasons recorded.
+Pre-implementation. Phase 0 in progress.

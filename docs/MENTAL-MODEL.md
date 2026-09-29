@@ -6,7 +6,7 @@
 > is the **canonical** mental model. The raw analyses in `docs/` are inputs, not
 > spec. Where they disagree, the adjudications in §5 win. Where a claim was
 > empirically disproved, the correction is marked "verified" inline and
-> detailed in `research_notes/Shipyard build primitives/VERIFIED.md`.
+> detailed in `reference/Shipyard build primitives/VERIFIED.md`.
 
 ---
 
@@ -36,10 +36,11 @@ Everything else is consequence:
 
 The invariant that makes this tractable: **only Bash mutates a host.** Go
 dispatches, observes, and records. It never writes a unit file, never flips a
-symlink, never restarts a service. This is why `docs/swap_link.sh` is the most
-important file in the repo — it is a complete, correct, atomic release swap
-(ready-marker gate, `umask 022`, `mv -Tf` on a symlink, `sync`) and it is the
-one place that "the new release is live" actually happens.
+symlink, never restarts a service. This is why the release swap is the most
+important thing in the project: it is the one place where "the new release is
+live" actually happens, and it must be atomic. You will write it by hand in
+Phase 1 — the recipe is in `docs/ROADMAP.md` §1.2, and the rules it must obey
+are in §8.1 below.
 
 Docker remains **lab-only**: containers are just Linux hosts you can `ssh` into.
 The engine is built once and reused.
@@ -214,12 +215,13 @@ missing mid-build → resume or `failed(build_interrupted)`; no `current` at all
 | D11 | Claim with inlined enum literals + partial index on `coalesce(lease_expires_at,'-infinity')`; `FOR UPDATE SKIP LOCKED` **inside** the CTE | Param-driven claim; lock outside a CTE | Verified: inlined form → `Index Scan` (O(queue depth)); lock outside CTE → silently not locked |
 | D12 | Status column: `text` + `CHECK` (not native ENUM) | `CREATE TYPE … AS ENUM` | `ALTER TYPE … ADD VALUE` can't run in the same txn that uses the value; enums are forward-only and painful to evolve |
 
-**The postgres-pro migration is DISCARDED.** It was moved to
-`db/migrations/_discarded/0001_init.up.sql.DISCARDED`, and the real schema does
-**not exist yet** — it is written by hand in Phase 2. See
-`db/migrations/_discarded/README.md` for a table of exactly how it violated D2,
-D4, D11, and D12. `docs/data-architecture.md` is the spec, corrected by
-`VERIFIED.md`.
+**The schema does not exist yet — you write it by hand in Phase 2.** An earlier
+agent-produced migration was analysed, found to violate D2, D4, D11, and D12, and
+removed; it remains in git history (`git show b3fa356`) as a record of a rejected
+design. There is no `db/` directory. The spec for what you will build is §3 (the
+three axes) and §4 (claim/lease) above, constrained by
+`reference/Shipyard build primitives/VERIFIED.md` §1, which contains the
+PostgreSQL traps that are otherwise invisible.
 
 ---
 
@@ -248,8 +250,8 @@ second phase list here — a duplicated roadmap is a divergent roadmap, which is
 how this project already produced three incompatible designs.
 
 The shape, in one line: the moat is the lab (a real, proven Linux deploy loop);
-everything after it is a viewer. Bottom-up from `docs/swap_link.sh`, and every
-phase ends in something you can *do*, not something you can *diagram*.
+everything after it is a viewer. Bottom-up from the atomic release swap, and
+every phase ends in something you can *do*, not something you can *diagram*.
 
 | Phase | Deliverable |
 |---|---|
@@ -279,8 +281,8 @@ Not a vibe. Six properties, each with a test (from the SRE analysis):
 3. **Convergence** — a crashed step is resumed by *inspecting the host*, not by
    retrying blindly.
 4. **Fail-closed** — bad nginx config never reaches `reload` (test `nginx -t`
-   first); a half-written release never becomes `current` (ready-marker gate,
-   already in `swap_link.sh`).
+   first); a half-written release never becomes `current` (ready-marker gate —
+   you build this in Phase 1).
 5. **Reversibility** — any deployment rolls back to any prior SHA, reproducibly.
 6. **Reproducibility** — deploy #N of a SHA produces a byte-identical release.
 
@@ -288,7 +290,7 @@ Not a vibe. Six properties, each with a test (from the SRE analysis):
 
 Property 4 (fail-closed) and 5 (reversible) are only true because of specific
 Linux behaviours. Each was verified; details and citations in
-`research_notes/Shipyard build primitives/VERIFIED.md`. Do not "simplify" these.
+`reference/Shipyard build primitives/VERIFIED.md`. Do not "simplify" these.
 
 - **Explicitly `systemctl restart` after the swap.** `.path` units do **not**
   reliably fire on atomic symlink replacement — the swap gives the symlink a new

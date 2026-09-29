@@ -7,7 +7,7 @@
 > **Rule zero:** if you can't `run` it, you haven't built it. Every phase ends in
 > something that executes on a real Linux box.
 >
-> Companion docs: `docs/MENTAL-MODEL.md` (why), `research_notes/…/VERIFIED.md`
+> Companion docs: `docs/MENTAL-MODEL.md` (why), `reference/…/VERIFIED.md`
 > (proven facts). Trust VERIFIED.md over any recollection.
 
 ---
@@ -109,7 +109,8 @@ sudo chown -R deploy:deploy /var/www/$APP   # a non-root 'deploy' user
 
 ## 1.2 The atomic symlink swap (the heart of the whole system)
 
-You already have a draft at `docs/swap_link.sh`. Verify and adopt it:
+This is the single most important 5 lines in the project. Write them yourself,
+from understanding — not by copying:
 
 ```bash
 ln -s "releases/$NEW" /var/www/myapp/.current.tmp
@@ -245,7 +246,7 @@ Postgres, (b) claims work safely across crashes, (c) drives `deploy.sh` over SSH
 
 This is the heart of the "production-grade" story. Build it before any API/UI.
 
-## 2.1 The schema (from `docs/data-architecture.md`, corrected per VERIFIED.md)
+## 2.1 The schema (from `docs/MENTAL-MODEL.md` §3–§4, constrained by VERIFIED.md §1)
 
 Write `db/migrations/0001_init.sql`. Minimum viable schema (add env/secrets later):
 
