@@ -1,0 +1,44 @@
+# ---- Go ----
+/shipyard
+/shipyard.exe
+*.test
+*.out
+coverage.*
+vendor/
+
+# ---- Node / Next.js ----
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# ---- Build & deploy artifacts (never commit a release) ----
+/tmp-releases/
+/releases/
+/shared/
+*.log
+/logs/
+
+# ---- Secrets: never commit these, ever ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!research_notes/**/*.key.example
+secrets/
+*.age
+
+# ---- Local lab scratch ----
+/lab/
+/lab-*/
+*.sock
+*.pid
+
+# ---- Editors / OS ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
