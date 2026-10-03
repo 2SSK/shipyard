@@ -225,6 +225,90 @@ PostgreSQL traps that are otherwise invisible.
 
 ---
 
+## 5.1 House conventions — inherited from `tenantflow`
+
+Shipyard deliberately reuses the engineering conventions already proven in
+`/home/ssk/Code/Projects/building/tenantflow`. Consistency across projects is worth
+more than theoretical purity. These are inherited *as-is* unless noted.
+
+### Go
+
+| Convention | Rule |
+|---|---|
+| **Router** | stdlib `net/http` `ServeMux` with Go 1.22+ method+pattern routing (`"POST /api/v1/deployments/{id}/cancel"`). **No gin/chi/echo.** |
+| **Interfaces at the consumer** | Each handler package declares the interfaces it needs (`type DeploymentStore interface{…}`). Concrete implementations live in the owning package. Dependency inversion without a DI framework. |
+| **Middleware** | Plain closures wrapping `http.HandlerFunc` (`reader := func(h http.HandlerFunc) http.Handler`). No middleware framework. |
+| **Config** | Plain struct + `Load() (Config, error)`. Helpers `getEnv`/`getEnvInt`/`getEnvBool` with defaults; invalid values return an error rather than silently defaulting. |
+| **Logging** | `log/slog`, injected as `*slog.Logger`. Env switch: JSON in production, human-readable text otherwise. `io.Writer` injected, not global. |
+| **Errors** | `fmt.Errorf("action: %w", err)` to wrap; `errors.As` for typed errors; handlers map domain errors to status codes at the edge via `writeError(w, status, msg)`. No error string parsing. |
+| **Context** | `r.Context()` threaded through every layer; context is the first parameter, never stored in a struct. |
+| **Integration tests** | Build-tagged: `//go:build integration`, run via `go test -tags integration ./internal/...` against **real** services. Unit tests use hand-written stubs, not mocks from a framework. |
+| **Makefile = the CI contract** | Targets mirror CI gates exactly: `fmt-check`, `vet`, `build`, `test`, `integration`, `race`, `check`. |
+
+### Docker / Compose
+
+| Convention | Rule |
+|---|---|
+| **All values interpolated** | Every port, image version, and credential comes from `.env` (`.env.example` committed, `.env` gitignored). Nothing hardcoded in compose. |
+| **Pinned versions** | `postgres:18.6`, not `postgres:18`. Verified behaviour must be reproducible. |
+| **`container_name` always set** | So `docker exec`/logs commands are predictable. |
+| **Restart policy by role** | `unless-stopped` for long-running; `on-failure:N` for one-shot init jobs. |
+| **`depends_on` with a condition** | `condition: service_healthy` or `service_completed_successfully`. **Never a `sleep`.** Ordering is declared, not hoped for. |
+| **Every service gets a `healthcheck`** | Plus `logging: driver: local, max-size, max-file` — bounded logs, which matters when fault-injection repeatedly kills processes. |
+| **Named networks and volumes** | `networks: {name: shipyard}` so the network is stable regardless of project directory. |
+| **One-shot init as a service** | Schema/seed application is a first-class container, not a manual step. |
+
+### Web (`web/`, not `ui/`)
+
+| Convention | Rule |
+|---|---|
+| **Stack** | Next.js 16 App Router · React 19 · Tailwind 4 · shadcn 4 (`@base-ui/react`, not Radix) · TypeScript strict. |
+| **Layout** | `web/app/api/*` proxy routes → Go engine, `web/app/dashboard/*` UI, `web/components/ui/*` shadcn primitives, `web/lib/{api,types,utils}.ts`. |
+| **BFF** | The browser never talks to the Go engine directly. `web/lib/api.ts` wraps `fetch` and throws `ApiFetchError` **preserving the upstream HTTP status** so proxy routes pass `409` through accurately. |
+| **Types** | `web/lib/types.ts` mirrors the Go models. Hand-maintained, generated later only if it becomes a proven pain point. |
+
+### Deliberate deviations from `tenantflow`
+
+These are conscious, not accidental.
+
+1. **Vertical slices, not horizontal layers.** `tenantflow` uses
+   `model/repository/service/handler`. Shipyard has one complex aggregate with a
+   state machine, a work queue, and a reconciler; horizontal slicing scatters a
+   single state machine across three packages. Shipyard instead owns the aggregate
+   whole:
+   ```
+   cmd/shipyard/        single binary: API + worker goroutine + reconciler goroutine
+   internal/config/     env → Config
+   internal/logger/     slog construction
+   internal/database/   pgx pool + go:embed migrations
+   internal/deployment/ the aggregate: types, state machine, queries, CAS transitions
+   internal/exec/       SSH client, script running, output streaming
+   internal/reconcile/  lease detection, host inspection, repair, is_active writer
+   internal/httpapi/    handlers + router (thin, no business logic)
+   web/                 Next.js + shadcn UI
+   db/migrations/       SQL files — source of truth, also embeddable
+   deploy/phases/       the Bash execution plane, one script per phase
+   infra/lab/           lab fleet: Dockerfile + compose.yaml
+   ```
+   The *conventions* (stdlib router, consumer-side interfaces, ctx-first, slog,
+   wrapped errors) are inherited unchanged — only the package boundaries differ.
+
+2. **One binary, not `cmd/api` + `cmd/worker`.** Splitting is defensible, but the
+   crash-recovery story is stronger when a single process is the whole engine:
+   killing it stops everything, and restarting it triggers reconciliation. The
+   counter-argument (a worker panic must not kill the reconciler) is deferred —
+   if it ever bites, supervised processes split cleanly along this boundary.
+
+3. **Migrations are embedded, but the SQL files remain the source of truth.** Same
+   files run under `psql` for debugging and under `go:embed` at boot for a
+   self-contained binary. Not two migration systems — one file set, two consumers.
+
+4. **SSE transport is still open.** `tenantflow` proxies through Next.js route
+   handlers; route handlers can buffer, which is fatal for a live event stream.
+   Preferred: a Next.js `rewrites()` proxy, which streams. See §9.
+
+---
+
 ## 6. API surface (shape, not spec)
 
 REST + OpenAPI 3.1 under `/v1` (Go boundary → no tRPC). Full endpoint list in

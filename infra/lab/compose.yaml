@@ -1,0 +1,25 @@
+services:
+  shipyard-01:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: shipyard-lab:test
+    container_name: shipyard-01
+    command: ["/sbin/init"]
+    privileged: true
+    cgroup: host
+    stop_signal: SIGRTMIN+3
+    tmpfs:
+      - /run
+      - /run/lock
+    volumes:
+      - shipyard-01-www:/var/www
+    networks:
+      - shipyard-lab
+
+volumes:
+  shipyard-01-www:
+
+networks:
+  shipyard-lab:
+    driver: bridge

@@ -1,438 +1,279 @@
-# Shipyard — Build Roadmap (hand-written, line by line)
+# Shipyard Roadmap — Learning by Building
 
-> **How to use this document.** Each phase has a *deliverable* you can run, a
-> *test* that proves it, and a *done when* line. Do them in order. Do not start
-> a phase until the previous one's test passes on a real machine.
+**Owner:** sskbtw
+**Status:** v1 — living document
+**Canonical roles:** this file is authoritative for **what to build next**. `docs/MENTAL-MODEL.md` wins on architecture. `docs/PRD.md` wins on product intent. `reference/Shipyard build primitives/VERIFIED.md` wins on empirical fact.
+
+> **How to use this.** Each phase has **Goal** (what "done" looks like), **Why it matters** (the lesson), **Steps** (ordered, each with a concrete acceptance check), and **Deliverable** (what you commit).
 >
-> **Rule zero:** if you can't `run` it, you haven't built it. Every phase ends in
-> something that executes on a real Linux box.
->
-> Companion docs: `docs/MENTAL-MODEL.md` (why), `reference/…/VERIFIED.md`
-> (proven facts). Trust VERIFIED.md over any recollection.
+> Work sequentially. Commit after every step. If an acceptance check fails twice, stop and ask — that's the learning moment.
 
 ---
 
-## The honest scope
+## Phase 0 — Lab Fleet (M0)
 
-You are building a **deployment control plane**: Next.js UI → Go control plane
-→ Bash executor → Linux hosts (git, systemd, nginx, journalctl). You write every
-line by hand. That means:
+**Goal:** Three systemd containers (`shipyard-01/02/03`) reachable over SSH on ports 2201/2202/2203.
+**Why it matters:** "The machine is the point." If SSH doesn't work, nothing downstream is real.
 
-- **No Docker/K8s in the product** (Docker is only a lab to get a throwaway Linux
-  host). The engine talks SSH to plain Linux.
-- **Fewer dependencies.** The Go side needs `x/crypto` (SSH) and `pgx` (Postgres).
-  The UI is Next.js. The executor is Bash. That's it.
-- **The lab is the product.** A real, proven `deploy.sh` that clones, builds,
-  swaps a symlink, restarts a unit, and health-checks is the hard part. The UI
-  is a viewer over it.
+### Steps
 
-Build bottom-up, from a real deploy, because the hardest correctness risks are
-in the Linux/git/systemd primitives — and those are all in Phase 1–2, before any
-Go or Postgres code exists.
+**0.1 Write `infra/lab/Dockerfile`**
+- Base `ubuntu:24.04`. Install `systemd`, `systemd-sysv`, `openssh-server`, `nginx`, `git`.
+- PID 1 must be systemd: `CMD ["/sbin/init"]`, `STOPSIGNAL SIGRTMIN+3`.
+- Create a dedicated unprivileged **`deploy`** user with `sudo` rights limited to the systemd/nginx commands the phases need.
+- Acceptance: `docker build` succeeds; `docker history` shows `git` present.
 
----
+**0.2 Write `infra/lab/compose.yaml`**
+- Three services. Ports `2201/2202/2203` → 22, `8081/8082/8083` → 80. Named volume per server for `/var/www` and `/var/log/shipyard`.
+- Required for systemd: `privileged: true`, `cgroup: host`, `tmpfs: [/run, /run/lock]`.
+- Acceptance: `docker compose -f infra/lab/compose.yaml up -d` starts all three.
 
-# Phase 0 — Toolchain & a throwaway Linux host
-
-**Goal:** a real Linux box you can SSH into and break, plus a Postgres you own.
-
-**Why first:** every later phase deploys *to a host*. You need one, and you need
-`systemd` + `sudo` on it. This is where the "production-grade" tests will run.
-
-## 0.1 Get a target host (pick one)
-
-- **Docker** (fastest, disposable, recommended to start):
-  ```bash
-  docker run -d --name shipyard-target --hostname target \
-    --privileged --cap-add SYS_ADMIN \
-    -p 2222:22 -v shipyard-data:/var/www \
-    ubuntu:24.04
-  ```
-  then install `systemd`, `openssh-server`, `git`, `nginx` inside it.
-  *(Containers are the lab only — the deploy engine itself is host-agnostic SSH.)*
-- **A VPS** (Hetzner/DigitalOcean/Linode free tier) — most realistic.
-- **Your own Linux box** — fine for a laptop, but systemd behavior differs.
-
-> **Note:** systemd inside Docker needs care (`--privileged` + cgroup mount, or
-> use an image that boots systemd, e.g. `jrei/systemd-ubuntu`). If that's
-> fighting you, use a VPS — the whole point is real systemd.
-
-## 0.2 Toolchain (install once)
-
-- **Go** 1.22+ (`go version`)
-- **PostgreSQL** 15+ locally (`psql --version`) — or use Docker for DB
-- **Node** 20+ / npm
-- **git**, **openssh-client**, a code editor
-- An SSH keypair you can use for the target
-
-## 0.3 Success test
-
+**0.3 Verify systemd is PID 1**
 ```bash
-ssh -p 2222 root@localhost 'systemctl --version && git --version && nginx -v'
+docker exec shipyard-01 systemctl is-system-running   # expect: running
+docker exec shipyard-01 systemctl is-active ssh        # expect: active
+docker exec shipyard-01 nginx -v
 ```
-Prints versions. **You can SSH in and run systemd commands.** That's the gate.
+- Acceptance: `running` / `active` on **all three**.
 
-**Done when:** you have a reachable Linux host with systemd, git, nginx, and a
-`ssh` alias (put it in `~/.ssh/config` as `Host target`).
-
----
-
-# Phase 1 — The Lab: one deploy, by hand, on the target
-
-**Goal:** a single Bash script that takes a commit SHA and makes it *live*,
-correctly, on the target host. No Go, no Postgres, no UI. Pure Linux.
-
-This phase is the moat. Everything else is a viewer. Spend real time here.
-
-## 1.1 The release layout (create once on the target)
-
+**0.4 Generate the lab SSH keypair**
 ```bash
-APP=myapp
-sudo mkdir -p /var/www/$APP/{releases,shared}
-sudo chown -R deploy:deploy /var/www/$APP   # a non-root 'deploy' user
+ssh-keygen -t ed25519 -f infra/lab/shipyard_lab_key -N "" -C "shipyard-lab"
+chmod 600 infra/lab/shipyard_lab_key
 ```
+- Acceptance: key exists, no passphrase.
 
-```
-/var/www/myapp/
-  releases/
-    1712345678/        # one dir per deploy (name = <epoch>-<sha7>)
-      .shipyard-ready  # marker: built + health-checked
-  shared/
-    .env               # secrets, 0600, lives OUTSIDE any release
-  current -> releases/1712345678   # the atomic pointer systemd/nginx follow
-```
+**0.5 Install the public key in each container**
+- Append `shipyard_lab_key.pub` to the **deploy** user's `/home/deploy/.ssh/authorized_keys`.
+- Set `chmod 700 ~/.ssh` and `chmod 600 authorized_keys` — sshd **silently ignores** files with loose permissions.
+- Acceptance: `ssh -i infra/lab/shipyard_lab_key -p 2201 deploy@localhost 'id'` succeeds with no password.
 
-**Key invariants to internalize:**
-- `current` is a **symlink**, swapped atomically (never `rm`+`ln`).
-- `.env` lives in `shared/`, **never** in a release dir (releases are disposable).
-- A release dir is only linked to `current` after it contains `.shipyard-ready`.
-
-## 1.2 The atomic symlink swap (the heart of the whole system)
-
-This is the single most important 5 lines in the project. Write them yourself,
-from understanding — not by copying:
-
+**0.6 Record the lab's known host keys**
 ```bash
-ln -s "releases/$NEW" /var/www/myapp/.current.tmp
-mv -Tf /var/www/myapp/.current.tmp /var/www/myapp/current
+ssh-keyscan -p 2201 -p 2202 -p 2203 localhost > infra/lab/known_hosts
 ```
+- Acceptance: three distinct entries, one per port.
 
-**Why this is correct** (teach this to yourself — it's the most important 5 lines
-in the project):
-- `ln -s` creates the new link under a **temp name**, leaving `current` intact.
-- `mv -T` (rename) **atomically replaces** the `current` symlink in one syscall.
-- A reader doing `readlink current` sees *either* the old or the new target,
-  *never* a missing link. No window where `current` points nowhere.
-- `mv -T` is required so it renames the **symlink itself** and doesn't move
-  *into* a directory named `current`.
+**0.7 Write the server seed**
+- Seed into Postgres in Phase 1, not a JSON file in `reference/`. `reference/` holds *documentation of facts*, not runtime configuration — the `servers` table is the single source of truth for connection details.
+- Acceptance: deferred to Phase 1.4.
 
-**Test it:** run a loop that reads `readlink current` 10,000 times in a tight
-shell loop while you swap 100 times in another. You must **never** see an error
-or a broken link.
+### Deliverable
+- `infra/lab/` contains `Dockerfile`, `compose.yaml`, `known_hosts`.
+- 30-second recording: `ssh -p 2201` → `systemctl status ssh` on all three.
 
-## 1.3 The systemd unit (stable file, points at `current`)
-
-Create **once** (`/etc/systemd/system/myapp.service`):
-
-```ini
-[Unit]
-Description=myapp
-After=network.target
-
-[Service]
-Type=notify                 # "started" == "actually serving" (needs sd_notify)
-User=deploy
-WorkingDirectory=/var/www/myapp/current
-ExecStart=/var/www/myapp/current/bin/server
-EnvironmentFile=-/var/www/myapp/shared/.env
-Restart=always
-RestartSec=2
-KillSignal=SIGTERM          # drain in-flight requests on stop
-TimeoutStopSec=30
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable myapp
-```
-
-**Critical understanding (VERIFIED):**
-- The unit references `current/`, so it **never changes**. A deploy does **not**
-  rewrite the unit or run `daemon-reload` — it swaps the symlink and runs
-  `systemctl restart myapp`. systemd resolves `ExecStart` at exec time, so the
-  restart picks up the new symlink target.
-- **Never** put the unit file inside `releases/` — deploy #2 breaks its paths.
-- `.path` units do **not** fire on atomic symlink swap (VERIFIED, systemd
-  #17727/#31941). The deploy must **explicitly restart**.
-
-## 1.4 The deploy script (the golden path)
-
-Write `deploy.sh`, run it **on the target** by SSH. It takes a SHA:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail            # -e exit on error, -u unset var is error, pipefail
-umask 022
-APP=myapp
-SHA="$1"                     # full commit sha
-ROOT=/var/www/$APP
-REL="$ROOT/releases/$(date +%s)-${SHA:0:7}"
-LOG=/var/log/shipyard-deploy.log
-
-# 1. CLONE the exact commit
-git clone --depth 1 --branch "$SHA" https://github.com/you/repo.git "$REL"
-#    (or: git init "$REL" && cd "$REL" && git remote add origin URL &&
-#     git fetch --depth 1 origin "$SHA" && git checkout --detach FETCH_HEAD)
-#    NOTE: fetching a bare SHA may need server support; see VERIFIED.md §3.1
-
-# 2. BUILD
-cd "$REL"
-./build.sh                   # your app's build
-
-# 3. LINK shared resources (secrets stay in shared/)
-ln -sf "$ROOT/shared/.env" "$REL/.env"
-
-# 4. HEALTH CHECK the new release BEFORE exposing it
-curl -fsS http://127.0.0.1:PORT/healthz || { echo "health failed"; exit 1; }
-
-# 5. MARK READY, then atomically swap
-touch "$REL/.shipyard-ready"
-ln -s "releases/$(basename "$REL")" "$ROOT/.current.tmp"
-mv -Tf "$ROOT/.current.tmp" "$ROOT/current"
-
-# 6. RESTART the service (NOT a .path unit — explicit)
-sudo systemctl restart myapp
-
-# 7. Verify
-sleep 2
-systemctl is-active --quiet myapp || { echo "service not active"; exit 1; }
-echo "deployed $SHA as $(basename "$REL")"
-```
-
-Run it against a real git repo **twice** and confirm: the second deploy replaces
-`current`, the service restarts onto the new release, and both deploys are
-reproducible (same SHA → same release contents).
-
-## 1.5 The rollback (must exist before the UI does)
-
-Rollback = re-point `current` at the previous release and restart. Literally the
-same steps 5–6 with the *old* release name. Prove it: deploy, break something,
-roll back, verify you're healthy. **This is a Phase-1 gate, not a Phase-6 feature.**
-
-## 1.6 Success test (all must pass)
-
-- [ ] `deploy.sh <sha>` deploys a real commit, live, on the target.
-- [ ] The symlink-swap race test (1.2) shows zero broken reads.
-- [ ] `systemctl restart` (not daemon-reload) picks up the new release.
-- [ ] Rollback to the previous SHA restores health.
-- [ ] A **failed** build or health check leaves `current` on the *old* release
-      (fail-closed — this is the whole point of `.shipyard-ready`).
-
-**Done when:** you can deploy and roll back a real app to a real server, by
-hand, reliably. This is the foundation. Do not proceed until it's solid.
+> **Do not commit `shipyard_lab_key`.** `.gitignore` it. It is disposable, but committing private keys is a habit worth never forming.
 
 ---
 
-# Phase 2 — The Go control plane: ledger, state machine, claim/lease
+## Phase 1 — Ledger (M1)
 
-**Goal:** wrap the lab deploy in a Go program that (a) records intent in
-Postgres, (b) claims work safely across crashes, (c) drives `deploy.sh` over SSH,
-(d) streams logs.
+**Goal:** Schema migrated; claim, CAS transition, and event append covered by integration tests against real Postgres.
+**Why it matters:** This is the write-ahead intent ledger. If the ledger is wrong, everything is wrong.
 
-This is the heart of the "production-grade" story. Build it before any API/UI.
+### Steps
 
-## 2.1 The schema (from `docs/MENTAL-MODEL.md` §3–§4, constrained by VERIFIED.md §1)
+> All steps in Phases 1–5 follow the house conventions in `docs/MENTAL-MODEL.md` §5.1.
 
-Write `db/migrations/0001_init.sql`. Minimum viable schema (add env/secrets later):
+**1.1 Create `.env` / `.env.example` and the `postgres` service**
+- Every port, image tag, and credential interpolated from `.env`. Pin `postgres:18.6`.
+- `healthcheck: pg_isready`, `logging: driver local` with `max-size`/`max-file`, named `networks` and `volumes`.
+- Acceptance: `psql` connects; `docker compose ps` shows `healthy`.
 
-- `servers`, `projects` (id, name).
-- `deployments`: `id`, `project_id`, `server_id`, `commit_sha`, `state` (text +
-  CHECK), `state_seq`, `lease_owner`, `lease_expires_at`, `lease_generation`,
-  `abort_requested_at`, timestamps.
-  - `slot_busy` as a `STORED` generated column over the non-terminal states.
-  - `UNIQUE (project_id, server_id) WHERE slot_busy` (VERIFIED: enforced).
-  - `is_active` (host-observed "this is live"), separate from `slot_busy`.
-- `deployment_events`: append-only audit spine (`deployment_id`, `seq`, `type`,
-  `from_state`, `to_state`, `worker_id`, `message`, `created_at`).
+**1.2 Write `db/migrations/001_initial.sql`** — exactly PRD §10.
+- Acceptance: applied cleanly; `\d deployments` shows `slot_busy` as `GENERATED ALWAYS AS (…) STORED`.
 
-**Test the schema against a real PG before building Go on it** (this is where I
-found the gotchas — you should too):
-```sql
--- insert two in-flight to same slot → expect `duplicate key ... slot_busy`
--- claim query → confirm EXPLAIN shows "Index Scan" (not Seq Scan)
+**1.3 Verify `slot_busy` is immutable**
+- Insert with `state='building'` → `slot_busy` must be `true`.
+- Update to `state='running'` → must become `false`.
+- Acceptance: `slot_busy` always equals the `state IN (…)` predicate.
+
+**1.4 Write the claim query** — PRD §10.1.
+- `FOR UPDATE SKIP LOCKED` **inside** the CTE.
+- Test: two concurrent claims against one row → exactly one succeeds.
+- Acceptance: `EXPLAIN` shows a `LockRows` node. Without it the lock is not being taken at all.
+
+**1.5 Write the CAS transition** — PRD §10.2.
+- Test: stale `lease_generation` → **zero rows**.
+- Acceptance: test asserts "zero rows = another actor won, abort".
+
+**1.6 Append-only events** — 3 events with increasing `seq`.
+- Acceptance: ordered read returns them in `seq` order.
+
+**1.7 Seed the three lab servers** into `servers`.
+- Acceptance: `SELECT * FROM servers` returns three rows using the real lab values from 0.5.
+
+**1.8 Set up the build contract**
+- `internal/database/` with `//go:embed migrations/*.sql`, applied in filename order at boot.
+- `Makefile` targets mirroring CI: `fmt-check`, `vet`, `build`, `test`, `integration`, `check`.
+- Integration tests carry `//go:build integration` and run via `go test -tags integration ./internal/...` against the real Postgres.
+- Acceptance: `make check` passes; `make integration` runs green.
+
+### Deliverable
+- `db/migrations/001_initial.sql`, `internal/database/` with embedded runner
+- `internal/deployment/claim_test.go`, `internal/deployment/transition_test.go` (`//go:build integration`)
+- `Makefile` + README section: *"Ledger — how we prevent double-execution"*
+
+---
+
+## Phase 2 — SSH Execution (M2)
+
+**Goal:** Engine runs a script remotely, streaming output and capturing the exit code.
+**Why it matters:** "Go never mutates a host" made concrete — Go only runs scripts and reads exit codes.
+
+### Steps
+
+**2.1 Add `golang.org/x/crypto/ssh`**
+- Acceptance: in `go.mod`.
+
+**2.2 Implement `SSHClient` with host key verification**
+- `ssh.PublicKeys(signer)` for authentication.
+- `HostKeyCallback` loads `infra/lab/known_hosts` from 0.6. Non-default ports appear as `[localhost]:2201` — the brackets are part of the key.
+- Acceptance: connects to `shipyard-01`.
+- **Do not use `ssh.InsecureIgnoreHostKey()`.** A deployment platform that accepts any host key is trivially MITM-able, and a reviewer will find it. Verify from step one — the cost of `known_hosts` is one file read.
+
+**2.3 Run a remote command**
+- `session.CombinedOutput("uname -a")`.
+- Acceptance: output captured, exit code 0.
+
+**2.4 Stream output in real time**
+- Pipe `session.Stdout`/`Stderr` into an `io.Writer` as bytes arrive. Use `io.MultiWriter` when the same bytes must both reach the terminal and be captured for `deployment_events`.
+- Acceptance: `sleep 5 && echo done` shows `done` after 5 s, not at exit.
+
+**2.5 Non-zero exit returns an error with output attached**
+- Acceptance: `bash -c 'exit 3'` errors, and the error carries the output.
+
+### Deliverable
+- `internal/exec/client.go` — connect, run, stream, close (context-first, `*slog.Logger` injected)
+- `cmd/shipyard/ssh-demo/main.go` — loads config, connects, runs `uname -a`
+- 15-second recording: `go run ./cmd/shipyard/ssh-demo` → remote output
+
+---
+
+## Phase 3 — Deploy Pipeline (M3)
+
+**Goal:** A real deploy lands on a lab container; every phase visible.
+**Why it matters:** The thesis becomes real.
+
+### Steps
+
+**3.1 Seed a `projects` row** — name, `repo_url`, `build_cmd`, `health_path`, `release_root`, `unit_name`.
+
+**3.2 Resolve the ref to an immutable SHA**
+- Resolve `branch | tag | commit` → a 40-char SHA **before** touching the host, and store it in `deployments.commit_sha`.
+- Acceptance: the recorded SHA is 40 hex chars and does not change for the life of the deployment.
+- **Why this step exists:** a branch tip is a moving target. Deploying "whatever `main` was when the clone happened" means the ledger recorded one intent and the host received another. The whole crash-recovery story depends on knowing exactly which commit reality is supposed to match.
+
+**3.3 Record intent** — `POST /api/v1/projects/{id}/deployments` returns `201 {state:"pending"}` and performs no host work.
+
+**3.4 Claim** — claim query → `state='cloning'`, `lease_owner` set, `lease_generation` bumped.
+- Acceptance: `slot_busy=true`.
+
+**3.5 Write the phase scripts** in `deploy/phases/`
+- `clone.sh` — `git clone` the repo, then `git checkout "$COMMIT_SHA"`. Use the shallow-fetch fallback ladder from `reference/…/git-and-fetch-fallback.md`; a bare `--depth=1` of a branch tip can omit the requested SHA entirely.
+- `build.sh` — `cd "$RELEASE_DIR" && $BUILD_CMD`
+- `configure.sh` — write the systemd unit + nginx site config, then `daemon-reload`
+- `start.sh` — `systemctl restart $UNIT_NAME` **via the root-owned allowlist wrapper** (Phase 0 requirement 6). `deploy` has no general sudo.
+- `healthcheck.sh` — `curl -sf "http://localhost$HEALTH_PATH"`
+- Acceptance: each exits 0 on success, non-zero on failure, and is safe to re-run.
+
+**3.6 Use the release layout + symlink swap**
 ```
-
-## 2.2 The Go module + SSH transport
-
-- `go mod init shipyard`; add `golang.org/x/crypto/ssh`, `jackc/pgx/v5`.
-- **`internal/sshx`**: dial a host by key with `known_hosts` verification, open a
-  non-PTY session, run `deploy.sh <sha>`, stream combined output to a local log
-  file, return the exit code. (VERIFIED notes: `Output` is on `*Session`;
-  `*ssh.ExitError.ExitStatus()`; use a dedicated `deploy` user with
-  passwordless `sudo` for just `systemctl restart myapp` via a sudoers drop-in.)
-- **Detached remote job** (if you want the deploy to survive an SSH drop): run
-  `( deploy.sh ... )` in a **subshell** on the remote, `nohup`/`setsid`, write an
-  exit-code file, and poll for it. (VERIFIED: `exit` in a script swallows the rc
-  write unless in a subshell; `SIGINT` can't be trapped in a detached job — use
-  `TERM`; also poll `kill -0` for liveness since `SIGKILL` writes no rc.)
-
-## 2.3 The state machine + write model
-
-- `internal/deploy/state.go`: the 9-state enum + a pure function
-  `Next(state) → state` allowed transitions, and `IsTerminal(state)`.
-- **Every transition** is: a fenced CAS write to `deployments.state` **and** an
-  `INSERT` into `deployment_events`, in **one transaction**. The
-  `deployments.state` column is a cache; the events table is the authority.
-  ```sql
-  UPDATE deployments SET state=$new, state_seq=state_seq+1
-   WHERE id=$id AND state_seq=$prev AND lease_owner=$worker;
-  INSERT INTO deployment_events (...) VALUES (...);
-  ```
-
-## 2.4 Claim / lease (the crash-safety core)
-
-- **Claim** (must match the partial index; lock INSIDE the CTE — VERIFIED):
-  ```sql
-  WITH cte AS (
-    SELECT id FROM deployments
-     WHERE state NOT IN ('running','failed','canceled')
-       AND (lease_expires_at IS NULL OR lease_expires_at < now())
-     ORDER BY coalesce(lease_expires_at,'-infinity')
-     FOR UPDATE SKIP LOCKED LIMIT 1)
-  UPDATE deployments SET lease_owner=$w, lease_expires_at=now()+ttl,
-                        lease_generation=lease_generation+1
-    FROM cte WHERE deployments.id=cte.id
-  RETURNING deployments.*;
-  ```
-- **Renew** the lease on a heartbeat; **fence** writes on `lease_generation`.
-- A **reconciler** goroutine: every 15s, find non-terminal rows with a dead
-  lease, inspect the *host* (release dir? unit active?), and resume/fail/cancel.
-
-**Why both SKIP LOCKED and the lease (VERIFIED — this corrected the design):**
-row locks do **not** survive a crashed worker (they release on txn end), so
-SKIP LOCKED only prevents *concurrent* claims. The lease recovers
-*committed-but-abandoned* work — the worker that claimed, committed, then died
-minutes later mid-SSH. Both are needed; they solve different problems.
-
-**Test:** in a psql harness, (a) two workers never claim the same row; (b) kill
-a worker *after* it commits a claim → within TTL the reconciler reclaims it;
-(c) a stale worker's fenced write is rejected.
-
-## 2.5 Log streaming to a file + a `LogSink` interface
-
-- `internal/logsink`: `interface { Write(line); Close() }`, first impl = local
-  file (append build output as it streams from SSH). Later: S3.
-  - Cap size (head+tail, `truncated` flag); store path/bytes/`sha256` in DB.
-  - Keep last ~100 lines in DB at terminal time so the UI needs no file I/O.
-
-**Done when:** a Go program, pointed at your Phase-1 target, can deploy a SHA by
-itself, survives being killed mid-deploy (reconciler converges), and writes a
-log file. This is the single most important milestone.
-
----
-
-# Phase 3 — The API (`/v1`)
-
-**Goal:** expose the control plane over HTTP so anything (curl, a script, the
-UI) can trigger and observe deploys.
-
-## 3.1 The endpoints (from the API design)
-
-- `POST /v1/deployments` → `201 {id, state:"pending"}` immediately (async work).
-  - `Idempotency-Key` supported; same key+payload replays the same response.
-- `GET /v1/deployments` — list, cursor-paginated (`?after=<cursor>`), never a
-  real timestamp in the page token.
-- `GET /v1/deployments/{id}` — full state; strong `ETag` (hash of
-  `state+state_seq`); `If-None-Match` → `304`.
-- `GET /v1/deployments/{id}/events` — the audit timeline.
-- `GET /v1/deployments/{id}/logs` — **SSE stream** of build output.
-  - `?after=<seq>` cursor for resume; keepalives (`: ping`) through proxies.
-  - `Content-Type: text/event-stream`, `X-Accel-Buffering: no`, flush per line.
-- `POST /v1/deployments/{id}/rollback` → redeploys a prior SHA.
-- `POST /v1/deployments/{id}/cancel` → sets `abort_requested_at`.
-- Errors: uniform `{error:{code,message,details}}`; `409 {reason:"deploy_in_flight"}`
-  from the `slot_busy` unique violation.
-
-## 3.2 Auth (MVP)
-
-A single admin bearer token from an env var, checked in middleware. The boundary
-matters more than the scheme; do not over-build it.
-
-**Test:** `curl` a deploy end-to-end; `kill -9` the API mid-deploy; confirm the
-reconciler converges and the stream reports a real terminal state.
-
-**Done when:** you can deploy via `curl` and watch it live in `curl -N`.
-
----
-
-# Phase 4 — The UI (Next.js)
-
-**Goal:** a deploy dashboard. Read-model only; all mutations go through the API.
-
-- **Stack:** Next.js (App Router) + TypeScript. Server Components fetch state;
-  a **client component** owns the `EventSource` for live logs (Server Components
-  can't use `EventSource`). A Next.js **Route Handler proxies** the Go SSE
-  stream same-origin (so it can attach the auth header `EventSource` can't set).
-- **Screens:**
-  - Fleet: servers + what's active on each (reconcile `is_active`).
-  - Project: deploy list (state, sha7, time, who/what triggered).
-  - Deploy detail: state timeline (from `events`), live build log (SSE), runtime
-    log (`journalctl` — separate!), release link (`current` symlink target),
-    rollback button.
-- **Design thesis** (from the UI design): a dense, honest infrastructure console.
-  Show the three status axes distinctly. Show the SHA, the unit, the paths. A
-  failed deploy must tell you *what* broke and *where* in seconds — that's the
-  whole value prop.
-
-**Test:** trigger a failing deploy in one tab, watch the state + log update live
-in another, click rollback, see it go healthy.
-
-**Done when:** a non-expert can watch a deploy and roll it back from the browser.
-
----
-
-# Phase 5 — Hardening (make it honest "production-grade")
-
-Each item has a **test** (from the SRE definition of production-grade):
-
-1. **Terminality** — kill the DB, kill the engine, let TTLs expire, restart →
-   no run is stuck non-terminal. *Test: `docker kill` things mid-deploy.*
-2. **Write-ahead** — power-loss mid-`mv` → reconciler converges (the `.tmp` symlink
-   is orphaned but harmless; `current` is never broken).
-3. **Convergence** — a crashed `building` step resumes by *inspecting the host*,
-   not blind-retrying.
-4. **Fail-closed config** — generate nginx config → write via temp+mv → `nginx -t`
-   → only `systemctl reload` on success. *Test: a bad config never takes effect.*
-5. **Reversibility** — every deployment rolls back to any prior SHA.
-6. **Reproducibility** — same SHA deploys to a byte-identical release.
-
-Also in this phase (each verified in VERIFIED.md):
-- Secrets: AES-256-GCM in Postgres, key from env/`sops`. Watch the AAD
-  case-sensitivity gotcha. `.env` written `0600` into `shared/`, never a release.
-- Multi-service per project; `services.unit_name` stored, not computed.
-- Env revisions (which revision a deploy used; `env_fingerprint` for drift).
-- nginx: `proxy_set_header` explicitly; `/healthz`; static root follows `current`.
-
-**Done when:** all six tests pass on a real host, including a hard `kill -9`
-mid-build with no human intervention.
-
----
-
-# The build order, one line
-
+/var/www/<project>/releases/<sha>/     ← built here
+/var/www/<project>/current -> releases/<sha>
 ```
-Phase 0  toolchain + a real Linux host you can SSH
-Phase 1  deploy.sh by hand (clone→build→swap→restart→health→rollback)  ← the moat
-Phase 2  Go: schema + claim/lease + SSH driver + state machine           ← crash-safety
-Phase 3  API: /v1 REST + SSE logs
-Phase 4  UI: deploy dashboard
-Phase 5  hardening: the six production-grade tests + secrets + nginx
-```
+- Swap atomically, then explicitly `systemctl restart`.
+- Acceptance: `readlink /var/www/<project>/current` shows the new SHA; the previous release directory is untouched.
 
-**If you only do one phase**, do Phase 1. It is the product; the rest is a
-control panel and a ledger over a deploy that actually works.
+**3.7 Advance state via CAS only**
+- Every transition uses `WHERE state_seq = $3 AND lease_generation = $4` from 1.5.
+- Zero rows → abort immediately, do not retry the write.
+- Acceptance: the deploy progresses `pending → cloning → building → configuring → starting → health_checking → running`, and a stale worker cannot corrupt it.
+
+### Deliverable
+- `internal/deployment/executor.go` — phase runner + event appender
+- `deploy/phases/*.sh`
+- 60-second recording of a full deploy progressing through all 9 states
+
+---
+
+## Phase 4 — UI + SSE (M4)
+
+**Goal:** Live phase-by-phase view.
+**Why it matters:** The "Viewer" persona's proof — a hiring manager sees the machine move.
+
+Stack is fixed: Next.js 16 App Router · React 19 · Tailwind 4 · shadcn 4 (`@base-ui/react`) · TypeScript strict, in `web/`.
+
+### Steps
+- **4.1** Scaffold `web/` with the house stack and the shadcn primitives this UI needs: `card`, `badge`, `table`, `button`, `separator`, `tooltip`, `sheet`.
+- **4.2** `web/lib/api.ts` — `apiFetch` wrapper throwing `ApiFetchError` that **preserves the upstream HTTP status**, so a `409 deploy_in_flight` survives the proxy.
+- **4.3** `web/lib/types.ts` — mirror the Go deployment model.
+- **4.4** `GET /api/v1/deployments` → table: `id | project | server | state | created_at`.
+- **4.5** `web/app/dashboard/deployments/[id]/page.tsx` → state, `commit_sha`, `release_path`.
+- **4.6** **SSE transport decision — resolve this first.** Next.js route handlers can buffer, which is fatal for a live stream. Preferred: a `rewrites()` proxy to the Go engine's `/events/stream`, which streams cleanly. Verify with a `curl -N` smoke test before building any UI on top of it.
+- **4.7** `EventSource` client appends events as they arrive; heartbeat comments keep the connection alive; clean up on unmount.
+- **4.8** Horizontal phase timeline; highlight advances as events arrive. Terminal states `failed` and `canceled` must render **distinctly**, not as a generic error.
+
+### Deliverable
+- `web/app/dashboard/deployments/[id]/page.tsx`
+- Screen recording: timeline advancing, events streaming
+
+---
+
+## Phase 5 — Reconciler (M5)
+
+**Goal:** A3, A4, A9 pass — crash recovery with no human intervention.
+**Why it matters:** "Crash-safe by design" — the core differentiator.
+
+### Steps
+- **5.1** Detect abandoned work: non-terminal rows whose `lease_expires_at` is well past `now()`. Grace period configurable via `Config` (`--reconcile-grace`, default 5 m) against a 30 s lease.
+- **5.2** Inspect the host over SSH: does the release dir exist? what does `systemctl is-active $UNIT_NAME` say? which SHA does `current` point at?
+- **5.3** Phase-appropriate repair: `health_checking` + service active → re-run only the health check. `building` + release dir missing → restart from clone.
+- **5.4** Write `is_active` + `active_verified_at` — the reconciler is the **only** writer of these.
+- **5.5** Fault-injection suite: for each non-terminal state, start a deploy, `docker kill --signal=SIGKILL shipyard-engine`, restart, assert recovery.
+- **5.6** **Put the engine in a container** so step 5.5 is deterministic. Killing a `go run` process by hunting PIDs is not a reproducible test.
+
+### Deliverable
+- `internal/reconcile/reconcile.go` (a goroutine in the single `cmd/shipyard` binary)
+- Recording: kill mid-deploy, show self-heal
+
+---
+
+## Phase 6 — Portability Proof (M6)
+
+**Goal:** A7 passes — a real VPS, zero engine code changes.
+**Why it matters:** The portfolio thesis is only credible if it survives a non-Docker target.
+
+### Steps
+- **6.1** Provision any Linux VPS with SSH access. Install the lab public key.
+- **6.2** Insert a `servers` row for it.
+- **6.3** Deploy. Expect `running`.
+- **6.4** README section: *"Deploying to a real VPS"* — exact commands, no engine changes.
+
+### Deliverable
+- README VPS instructions a peer can follow unattended
+- Recording: same UI, different host
+
+---
+
+## Phase 7 — Polish & Portfolio
+
+- **7.1** Case study (<1500 words): thesis, 3-plane diagram, crash-recovery demo.
+- **7.2** Recordings: 60 s deploy, 30 s crash recovery, 30 s VPS deploy.
+- **7.3** CI: `! grep -r 'github.com/docker/docker' cmd/ internal/` plus integration tests on PR.
+- **7.4** Publish to `sskbtw.xyz`.
+
+---
+
+## Working rhythm
+
+1. **One phase at a time.** Phase 1 tests pass before Phase 2 starts.
+2. **Commit every step.** Small and atomic — you will thank yourself during debugging.
+3. **Ask when blocked.** Two failed acceptance checks means stop and ask.
+4. **Record as you go.** Every deliverable is a portfolio artifact. Don't defer them.
+
+---
+
+## Next action
+
+**Phase 0, step 0.1** — write `infra/lab/Dockerfile` yourself. Acceptance: `docker build` succeeds and `git` is installed.
