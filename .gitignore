@@ -30,9 +30,7 @@ next-env.d.ts
 secrets/
 *.age
 
-# ---- Local lab scratch ----
-/lab/
-/lab-*/
+# ---- Runtime scratch ----
 *.sock
 *.pid
 

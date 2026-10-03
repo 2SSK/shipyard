@@ -1,25 +1,68 @@
+x-server: &server
+  image: shipyard-lab
+  privileged: true
+  cgroup: host
+  tmpfs: [/run, /run/lock]
+  networks: [shipyard-lab]
+  depends_on:
+    keys:
+      condition: service_completed_successfully
+
 services:
+  keys:
+    build: .
+    image: shipyard-lab
+    network_mode: none
+    volumes: [./keys:/keys]
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        [ -f /keys/lab_key ] || ssh-keygen -q -t ed25519 -N '' -C shipyard-lab -f /keys/lab_key
+        echo "[localhost]:2201,[localhost]:2202,[localhost]:2203 $$(cat /etc/ssh/ssh_host_ed25519_key.pub)" > /keys/known_hosts
+        chown $$(stat -c %u:%g /keys) /keys/lab_key /keys/lab_key.pub /keys/known_hosts
+
   shipyard-01:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: shipyard-lab:test
+    <<: *server
     container_name: shipyard-01
-    command: ["/sbin/init"]
-    privileged: true
-    cgroup: host
-    stop_signal: SIGRTMIN+3
-    tmpfs:
-      - /run
-      - /run/lock
+    ports: ["2201:22", "8081:80"]
     volumes:
-      - shipyard-01-www:/var/www
-    networks:
-      - shipyard-lab
+      [
+        ./keys:/keys:ro,
+        shipyard-01-www:/var/www,
+        shipyard-01-log:/var/log/shipyard,
+      ]
+
+  shipyard-02:
+    <<: *server
+    container_name: shipyard-02
+    ports: ["2202:22", "8082:80"]
+    volumes:
+      [
+        ./keys:/keys:ro,
+        shipyard-02-www:/var/www,
+        shipyard-02-log:/var/log/shipyard,
+      ]
+
+  shipyard-03:
+    <<: *server
+    container_name: shipyard-03
+    ports: ["2203:22", "8083:80"]
+    volumes:
+      [
+        ./keys:/keys:ro,
+        shipyard-03-www:/var/www,
+        shipyard-03-log:/var/log/shipyard,
+      ]
 
 volumes:
   shipyard-01-www:
+  shipyard-01-log:
+  shipyard-02-www:
+  shipyard-02-log:
+  shipyard-03-www:
+  shipyard-03-log:
 
 networks:
   shipyard-lab:
-    driver: bridge
