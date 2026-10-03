@@ -18,51 +18,59 @@
 ### Steps
 
 **0.1 Write `infra/lab/Dockerfile`**
-- Base `ubuntu:24.04`. Install `systemd`, `systemd-sysv`, `openssh-server`, `nginx`, `git`.
+- Base `ubuntu:24.04`. Install `systemd`, `systemd-sysv`, `openssh-server`, `nginx`, `git`, `dbus`.
 - PID 1 must be systemd: `CMD ["/sbin/init"]`, `STOPSIGNAL SIGRTMIN+3`.
 - Create a dedicated unprivileged **`deploy`** user with `sudo` rights limited to the systemd/nginx commands the phases need.
+- **Ship `dbus`.** Without it `/run/systemd/private` is root-only and unprivileged `systemctl` over SSH fails with `Failed to connect to bus`. A real VPS does not do that, and the engine will read host state unprivileged.
+- Keep config in real files (`sshd-lab.conf`, `sudoers-deploy`, `entrypoint.sh`), not Dockerfile heredocs — they can be read, diffed and linted on their own. Validate the sudoers file with `visudo -c` at build time.
 - Acceptance: `docker build` succeeds; `docker history` shows `git` present.
 
 **0.2 Write `infra/lab/compose.yaml`**
-- Three services. Ports `2201/2202/2203` → 22, `8081/8082/8083` → 80. Named volume per server for `/var/www` and `/var/log/shipyard`.
+- Three services. Ports `2201/2202/2203` → 22, `8081/8082/8083` → 80. Named volume per server for `/var/www`, `/var/log/shipyard` and `/etc/ssh/hostkeys`.
 - Required for systemd: `privileged: true`, `cgroup: host`, `tmpfs: [/run, /run/lock]`.
-- Acceptance: `docker compose -f infra/lab/compose.yaml up -d` starts all three.
+- Two one-shot init containers bracket the fleet: `keys` must complete before any host starts, `known-hosts` after all hosts are healthy.
+- Acceptance: `docker compose -f infra/lab/compose.yaml up -d` starts all three and captures host keys.
 
 **0.3 Verify systemd is PID 1**
 ```bash
 docker exec shipyard-01 systemctl is-system-running   # expect: running
-docker exec shipyard-01 systemctl is-active ssh        # expect: active
+docker exec shipyard-01 systemctl is-active ssh.socket # expect: active
 docker exec shipyard-01 nginx -v
 ```
 - Acceptance: `running` / `active` on **all three**.
+- **Probe `ssh.socket`, not `ssh`.** Ubuntu 24.04 activates sshd by socket and starts `ssh.service` per connection, so `ssh.service` is inactive by design and never becomes active while you poll. Probing it marks every host permanently unhealthy.
 
-**0.4 Generate the lab SSH keypair**
-```bash
-ssh-keygen -t ed25519 -f infra/lab/shipyard_lab_key -N "" -C "shipyard-lab"
-chmod 600 infra/lab/shipyard_lab_key
-```
-- Acceptance: key exists, no passphrase.
+**0.4 Give each host its own identity**
+- `rm -f /etc/ssh/ssh_host_*_key*` in the image, then `entrypoint.sh` generates an ed25519 host key on first boot into the `/etc/ssh/hostkeys` volume.
+- An image that ships host keys hands its private keys to anyone who pulls it *and* makes every host built from it indistinguishable. Bake none.
+- Acceptance: three distinct host key fingerprints. Volume-backed, so `down` keeps them and only `down -v` rotates.
 
-**0.5 Install the public key in each container**
-- Append `shipyard_lab_key.pub` to the **deploy** user's `/home/deploy/.ssh/authorized_keys`.
-- Set `chmod 700 ~/.ssh` and `chmod 600 authorized_keys` — sshd **silently ignores** files with loose permissions.
-- Acceptance: `ssh -i infra/lab/shipyard_lab_key -p 2201 deploy@localhost 'id'` succeeds with no password.
+**0.5 Bootstrap the login keypair (`Dockerfile.init` + `init.sh keys`)**
+- Generate `infra/lab/keys/lab_key` on the host, reused if already present, `chmod 600`, and owned by the host user so `ssh -i` works.
+- sshd reads it via `AuthorizedKeysCommand /usr/bin/cat /keys/lab_key.pub` with `AuthorizedKeysCommandUser nobody` — no `authorized_keys`, so there are no `~/.ssh` permission rules to get wrong.
+- Acceptance: `ssh -i infra/lab/keys/lab_key -p 2201 deploy@localhost 'id'` succeeds with no password, with no `~/.ssh` present at all.
 
-**0.6 Record the lab's known host keys**
-```bash
-ssh-keyscan -p 2201 -p 2202 -p 2203 localhost > infra/lab/known_hosts
-```
+**0.6 Capture the known host keys (`init.sh known-hosts`)**
+- Runs after all three report healthy. Writes `infra/lab/keys/known_hosts`, keyed by `[localhost]:220N` so it matches the address the engine dials.
+- Must write atomically and **refuse to write a capture that collapsed to one identity** — that means the fleet is sharing a host key and known_hosts has quietly stopped verifying anything.
 - Acceptance: three distinct entries, one per port.
 
-**0.7 Write the server seed**
+**0.7 `init.sh check` — the acceptance test as code**
+- Asserts key presence, `0600`, three distinct identities, and that what `known_hosts` claims is what each host presents *right now*.
+- Must exit non-zero when a host key has rotated underneath a stale file, and a real SSH connection must then fail. A check that only passes is not a check.
+- Acceptance: passes after `up`; fails after `down -v` + starting only the servers; passes again after re-running `known-hosts`.
+
+**0.8 Write the server seed**
 - Seed into Postgres in Phase 1, not a JSON file in `reference/`. `reference/` holds *documentation of facts*, not runtime configuration — the `servers` table is the single source of truth for connection details.
 - Acceptance: deferred to Phase 1.4.
 
 ### Deliverable
-- `infra/lab/` contains `Dockerfile`, `compose.yaml`, `known_hosts`.
-- 30-second recording: `ssh -p 2201` → `systemctl status ssh` on all three.
+- `infra/lab/` contains `Dockerfile`, `Dockerfile.init`, `compose.yaml`, `entrypoint.sh`, `init.sh`, `sshd-lab.conf`, `sudoers-deploy`.
+- 30-second recording: `ssh -p 2201` → `systemctl status ssh.socket` on all three.
 
-> **Do not commit `shipyard_lab_key`.** `.gitignore` it. It is disposable, but committing private keys is a habit worth never forming.
+> **Nothing generated is committed.** `infra/lab/keys/` holds the login keypair and `known_hosts`, both derived state, ignored by `infra/lab/keys/.gitignore`. Regenerate with `up`; rotate with `run --rm keys rotate`. Committing private keys is a habit worth never forming.
+
+> **The `deploy` sudoers file is not a security boundary, and does not pretend to be.** `deploy` has group write on `/etc/systemd/system`, so it can add a unit and then start it as root — unavoidable for this workflow, fine on a disposable lab host, and not a pattern to copy onto a shared or production host.
 
 ---
 
@@ -101,7 +109,7 @@ ssh-keyscan -p 2201 -p 2202 -p 2203 localhost > infra/lab/known_hosts
 - Acceptance: ordered read returns them in `seq` order.
 
 **1.7 Seed the three lab servers** into `servers`.
-- Acceptance: `SELECT * FROM servers` returns three rows using the real lab values from 0.5.
+- Acceptance: `SELECT * FROM servers` returns three rows using the real lab values from 0.5/0.6.
 
 **1.8 Set up the build contract**
 - `internal/database/` with `//go:embed migrations/*.sql`, applied in filename order at boot.
@@ -128,7 +136,7 @@ ssh-keyscan -p 2201 -p 2202 -p 2203 localhost > infra/lab/known_hosts
 
 **2.2 Implement `SSHClient` with host key verification**
 - `ssh.PublicKeys(signer)` for authentication.
-- `HostKeyCallback` loads `infra/lab/known_hosts` from 0.6. Non-default ports appear as `[localhost]:2201` — the brackets are part of the key.
+- `HostKeyCallback` loads `infra/lab/keys/known_hosts` from 0.6. Non-default ports appear as `[localhost]:2201` — the brackets are part of the key.
 - Acceptance: connects to `shipyard-01`.
 - **Do not use `ssh.InsecureIgnoreHostKey()`.** A deployment platform that accepts any host key is trivially MITM-able, and a reviewer will find it. Verify from step one — the cost of `known_hosts` is one file read.
 
@@ -172,8 +180,8 @@ ssh-keyscan -p 2201 -p 2202 -p 2203 localhost > infra/lab/known_hosts
 **3.5 Write the phase scripts** in `deploy/phases/`
 - `clone.sh` — `git clone` the repo, then `git checkout "$COMMIT_SHA"`. Use the shallow-fetch fallback ladder from `reference/…/git-and-fetch-fallback.md`; a bare `--depth=1` of a branch tip can omit the requested SHA entirely.
 - `build.sh` — `cd "$RELEASE_DIR" && $BUILD_CMD`
-- `configure.sh` — write the systemd unit + nginx site config, then `daemon-reload`
-- `start.sh` — `systemctl restart $UNIT_NAME` **via the root-owned allowlist wrapper** (Phase 0 requirement 6). `deploy` has no general sudo.
+- `configure.sh` — write the systemd unit + nginx site config directly (Phase 0 gives `deploy` group write on `/etc/systemd/system` and the nginx site dirs), then `daemon-reload` via sudo.
+- `start.sh` — `systemctl restart $UNIT_NAME` via `sudo`, matched by the `SHIPYARD` allowlist in `infra/lab/sudoers-deploy`. `deploy` has no general sudo — but it *can* write unit files, so treat the allowlist as a guard rail on a disposable lab host, not a security boundary.
 - `healthcheck.sh` — `curl -sf "http://localhost$HEALTH_PATH"`
 - Acceptance: each exits 0 on success, non-zero on failure, and is safe to re-run.
 
@@ -276,4 +284,4 @@ Stack is fixed: Next.js 16 App Router · React 19 · Tailwind 4 · shadcn 4 (`@b
 
 ## Next action
 
-**Phase 0, step 0.1** — write `infra/lab/Dockerfile` yourself. Acceptance: `docker build` succeeds and `git` is installed.
+**Phase 0, step 0.1** — write `infra/lab/Dockerfile` yourself. Acceptance: `docker build` succeeds, `git` and `dbus` are installed, and `visudo -c` passes on the sudoers file.

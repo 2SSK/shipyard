@@ -249,7 +249,7 @@ more than theoretical purity. These are inherited *as-is* unless noted.
 
 | Convention | Rule |
 |---|---|
-| **All values interpolated** | Every port, image version, and credential comes from `.env` (`.env.example` committed, `.env` gitignored). Nothing hardcoded in compose. |
+| **Engine config interpolated, lab config literal** | The engine's own infrastructure (Postgres, etc.) takes ports, versions and credentials from `.env` (`.env.example` committed, `.env` gitignored). `infra/lab/` is the exception: it is a fixed fixture with fixed published ports, deliberately literal so the acceptance commands in the roadmap are copy-pasteable. A lab you have to configure before you can run is not a fixture. |
 | **Pinned versions** | `postgres:18.6`, not `postgres:18`. Verified behaviour must be reproducible. |
 | **`container_name` always set** | So `docker exec`/logs commands are predictable. |
 | **Restart policy by role** | `unless-stopped` for long-running; `on-failure:N` for one-shot init jobs. |
@@ -288,7 +288,7 @@ These are conscious, not accidental.
    web/                 Next.js + shadcn UI
    db/migrations/       SQL files — source of truth, also embeddable
    deploy/phases/       the Bash execution plane, one script per phase
-   infra/lab/           lab fleet: Dockerfile + compose.yaml
+   infra/lab/           lab fleet: Dockerfile + compose.yaml + init containers
    ```
    The *conventions* (stdlib router, consumer-side interfaces, ctx-first, slog,
    wrapped errors) are inherited unchanged — only the package boundaries differ.
@@ -336,15 +336,6 @@ how this project already produced three incompatible designs.
 The shape, in one line: the moat is the lab (a real, proven Linux deploy loop);
 everything after it is a viewer. Bottom-up from the atomic release swap, and
 every phase ends in something you can *do*, not something you can *diagram*.
-
-| Phase | Deliverable |
-|---|---|
-| 0 | Toolchain + a real Linux host you can SSH into |
-| 1 | Golden path: `deploy.sh <sha>` clone → build → swap → restart → health → rollback |
-| 2 | Go engine: schema + claim/lease + state machine + SSH driver |
-| 3 | `/v1` REST + SSE logs |
-| 4 | Next.js deploy dashboard |
-| 5 | Hardening: the six production-grade tests, secrets, nginx |
 
 Phases 1 and 2 are the load-bearing ones. **Do not start Phase 3 (API) or 4
 (UI) until Phase 2's kill -9 → reconciler test passes.** A control plane that

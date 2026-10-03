@@ -1,0 +1,13 @@
+# One-shot init container for the lab fleet.
+#
+# Holds only what key bootstrap and host-key capture need -- no systemd, no
+# nginx, no git -- so the job stays small and its dependency surface is obvious.
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --chmod=0755 init.sh /usr/local/bin/init.sh
+
+ENTRYPOINT ["/usr/local/bin/init.sh"]
+CMD ["keys"]
