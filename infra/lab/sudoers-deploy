@@ -1,15 +1,3 @@
-# Shipyard lab: the deploy user may drive systemd and nginx, nothing else.
-#
-# This is NOT a security boundary, and the lab does not pretend otherwise.
-# deploy can write /etc/systemd/system -- configure.sh has to install the unit
-# file -- so it can add a unit and start it as root. That is fine on a
-# disposable lab host and unavoidable for this workflow. Do not copy this
-# pattern onto a shared or production host.
-#
-# Reads (systemctl show, is-active, is-system-running) need no sudo at all: the
-# image ships dbus, so the engine can inspect host state unprivileged exactly
-# as it would over SSH on a real VPS.
-
 Cmnd_Alias SHIPYARD = /usr/bin/systemctl daemon-reload, \
   /usr/bin/systemctl start *, /usr/bin/systemctl stop *, \
   /usr/bin/systemctl restart *, /usr/bin/systemctl reload *, \

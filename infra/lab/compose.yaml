@@ -1,15 +1,13 @@
-# Lab fleet: three Ubuntu hosts that stand in for VPS targets.
+# Lab fleet: three Ubuntu hosts standing in for VPS targets.
 #
-#   docker compose up -d                        bring the fleet up, capture host keys
-#   docker compose run --rm keys rotate         replace the lab keypair
-#   docker compose run --rm known-hosts check   assert the fleet's SSH invariants
-#   docker compose down -v                      rotate every host key as well
+#   docker compose up -d                      bring up, capture host keys
+#   docker compose run --rm keys rotate       replace the lab keypair
+#   docker compose run --rm known-hosts check assert the SSH invariants
+#   docker compose down -v                    also rotate every host key
 #
-# Two one-shot init containers bracket the fleet. `keys` must finish before any
-# host starts, because sshd needs the public key to authenticate anyone.
-# `known-hosts` must finish after, because it captures each host's identity once
-# that host has one. Neither is a dependency of the other and neither holds
-# state the fleet needs at runtime.
+# The two init containers bracket the fleet: `keys` must finish before any host
+# starts (sshd needs the public key to authenticate anyone) and `known-hosts`
+# after all hosts are healthy (it captures their identities).
 
 x-server: &server
   image: shipyard-lab
@@ -24,20 +22,17 @@ x-server: &server
   depends_on:
     keys:
       condition: service_completed_successfully
-  # Bounded logs: Phase 5 kills these containers repeatedly on purpose.
   logging:
     driver: local
     options:
       max-size: 10m
       max-file: "3"
-  # Ready means: this host has its own identity and is accepting sessions.
-  #
-  # Ubuntu 24.04 activates sshd through ssh.socket and starts ssh.service per
-  # connection, so ssh.service is inactive by design and never becomes active
-  # while we poll. ssh.socket is the signal that actually means "accepting
-  # sessions" -- probing ssh.service marks every host permanently unhealthy.
   healthcheck:
-    test: ["CMD-SHELL", "test -s /etc/ssh/hostkeys/ssh_host_ed25519_key.pub && systemctl is-active --quiet ssh.socket"]
+    test:
+      [
+        "CMD-SHELL",
+        "test -s /etc/ssh/hostkeys/ssh_host_ed25519_key.pub && systemctl is-active --quiet ssh.socket",
+      ]
     interval: 2s
     timeout: 3s
     retries: 15
@@ -55,16 +50,14 @@ services:
   keys:
     <<: *init
     container_name: shipyard-keys
-    # No network: this job only touches ./keys.
     network_mode: none
+
     command: [keys]
 
   known-hosts:
     <<: *init
     container_name: shipyard-known-hosts
-    # Host networking so localhost:220N is the fleet's published port, which is
-    # the address the engine dials. Keying known_hosts by service name instead
-    # would produce a file the engine cannot use.
+    # Hosengine cannot use.
     network_mode: host
     command: [known-hosts]
     depends_on:
