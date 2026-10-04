@@ -4,14 +4,6 @@
 #   make lab-check                                  assert the fleet is deployable
 #   make lab-rotate-key                             replace the lab keypair
 #   make lab-reset                                  tear down, rotating every host key
-#
-# The two init containers bracket the fleet: `keys` must finish before any host
-# starts (sshd needs the public key to authenticate anyone) and `known-hosts`
-# after all hosts are healthy (it captures their identities).
-#
-# Every port is published on 127.0.0.1 only. The fleet is a fixture, not a
-# service: nothing outside this machine should be able to reach its sshd, and the
-# engine dials the same loopback address a developer would.
 
 x-server: &server
   image: shipyard-lab
@@ -61,12 +53,6 @@ services:
   known-hosts:
     <<: *init
     container_name: shipyard-known-hosts
-    # Host networking, deliberately. `known_hosts` must be keyed by the address
-    # the client will actually dial, and the engine dials the *host's* loopback
-    # (127.0.0.1:2201). Only the host network namespace sees that address;
-    # scanning shipyard-01:22 over the lab bridge would record a different one and
-    # then have to be rewritten into a lie. Same reason `check` runs here: its
-    # assertions are end-to-end SSH from the host's point of view.
     network_mode: host
     command: [known-hosts]
     depends_on:

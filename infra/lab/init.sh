@@ -1,14 +1,10 @@
 #!/bin/sh
-# Lab init container.
-#
+
 #   keys          ensure the lab keypair exists, then fix its permissions
 #   known-hosts   capture each lab host's identity into known_hosts
 #   rotate        replace the lab keypair, revoking the old key
 #   check         assert the fleet is a usable Linux deployment target
-#
-# Every command converges on the desired state, so running one twice is a no-op.
-# `keys` and `rotate` need no network; `known-hosts` and `check` share the host's
-# network namespace so they observe the address the engine will dial.
+
 set -eu
 
 KEYS_DIR=/keys
@@ -16,10 +12,6 @@ KEY=$KEYS_DIR/lab_key
 PUB=$KEYS_DIR/lab_key.pub
 KNOWN_HOSTS=$KEYS_DIR/known_hosts
 
-# The address the engine dials, and therefore the address known_hosts is keyed by.
-# A literal loopback address, not `localhost`: SSH matches host keys on the
-# string it was given, so `localhost` would need a second known_hosts entry, and
-# it resolves through /etc/hosts (::1 first on some images).
 ADDR=${LAB_ADDR:-127.0.0.1}
 
 # published-port=hostname, the same pairing compose.yaml declares.
@@ -40,7 +32,6 @@ ports() { for p in $FLEET; do echo "${p%%=*}"; done; }
 # without its public half, which would silently rotate the fleet's login.
 generate_keypair() {
     tmp=$(mktemp -d)
-    # shellcheck disable=SC2064
     trap "rm -rf '$tmp'" EXIT
     ssh-keygen -q -t ed25519 -N '' -C shipyard-lab -f "$tmp/lab_key"
     chmod 600 "$tmp/lab_key"
@@ -89,15 +80,12 @@ cmd_known_hosts() {
 
     # Staged in the same directory so the rename is atomic.
     tmp=$(mktemp "$KEYS_DIR/.known_hosts.XXXXXX")
-    # shellcheck disable=SC2064  # $tmp must be captured now, not at trap time
     trap "rm -f '$tmp'" EXIT
     for port in $(ports); do
         ssh-keyscan -t ed25519 -p "$port" "$ADDR" >>"$tmp" 2>/dev/null \
             || die "keyscan failed on $ADDR:$port"
     done
 
-    # One identity means the fleet is sharing a host key and known_hosts has
-    # quietly stopped verifying anything.
     want=$(hostnames | wc -l)
     got=$(cut -d' ' -f3 "$tmp" | sort -u | wc -l)
     [ "$got" -eq "$want" ] || die "expected $want distinct host keys, got $got -- hosts are sharing an identity"
@@ -109,10 +97,6 @@ cmd_known_hosts() {
     log "captured $got distinct host identities -> $KNOWN_HOSTS"
 }
 
-# One SSH round trip per host. Every fact below is observed *through* that
-# connection, so a pass proves authentication, host identity and network
-# reachability together -- the invariant the engine actually depends on.
-# shellcheck disable=SC2016  # expanded by the remote shell, not this one
 PROBE='
 printf "hostname=%s\n" "$(hostname)"
 printf "user=%s\n" "$(id -un)"
@@ -140,8 +124,6 @@ probe_host() {
 
 field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
 
-# Phase 0's acceptance test, as code: "this is a usable Linux deployment target",
-# not merely "SSH works".
 cmd_check() {
     rc=0
     pass() { printf '  ok    %s\n' "$*"; }
@@ -203,9 +185,6 @@ cmd_check() {
     for spec in $FLEET; do
         port=${spec%%=*}
         expected=${spec#*=}
-        # Not `out=$(probe_host "$port")`: a failed command substitution under
-        # `set -e` would abort the whole check on the first unreachable host
-        # instead of reporting every host's state.
         out=$(probe_host "$port") || out=''
         if [ -z "$out" ]; then
             fail "$expected unreachable at $ADDR:$port (ssh or host key rejected)"

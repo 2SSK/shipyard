@@ -1,0 +1,42 @@
+# The engine's own infrastructure
+#
+# make db-up      start it and wait until it is healthy
+# make db-check   assert it answers a real query
+# make db-down    stop it, keep the data
+# make db-reset   stop it and discard the volume: a byte-clean ledger
+# make db-psql    open a psql session against it
+
+name: shipyard-engine
+
+services:
+  postgres:
+    image: postgres:${POSTGRES_VERSION}
+    container_name: shipyard-postgres
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks: [shipyard]
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+volumes:
+  postgres-data:
+
+networks:
+  shipyard:
+    name: shipyard
