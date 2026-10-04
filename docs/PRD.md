@@ -334,7 +334,7 @@ Sequencing detail is authoritative in `docs/ROADMAP.md`. This is the acceptance 
 
 | # | Milestone | Done when |
 |---|---|---|
-| M0 | **Lab fleet** | 3 systemd containers up; SSH key works on ports 2201/2202/2203 |
+| M0 | **Lab fleet** | 3 systemd containers up; `make lab-check` prints `Lab read.` — SSH key works on 2201/2202/2203 and each host answers as a deployment target |
 | M1 | **Ledger** | Schema migrated; claim, CAS transition, and event append all covered by integration tests against real Postgres |
 | M2 | **SSH execution** | Engine runs a script remotely, captures streamed output + exit code |
 | M3 | **Deploy pipeline** | Real deploy lands on a lab container; A1 passes |

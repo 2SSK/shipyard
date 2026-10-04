@@ -1,13 +1,17 @@
 # Lab fleet: three Ubuntu hosts standing in for VPS targets.
 #
-#   docker compose up -d                      bring up, capture host keys
-#   docker compose run --rm keys rotate       replace the lab keypair
-#   docker compose run --rm known-hosts check assert the SSH invariants
-#   docker compose down -v                    also rotate every host key
+#   make lab-up                                     bring up, capture host keys
+#   make lab-check                                  assert the fleet is deployable
+#   make lab-rotate-key                             replace the lab keypair
+#   make lab-reset                                  tear down, rotating every host key
 #
 # The two init containers bracket the fleet: `keys` must finish before any host
 # starts (sshd needs the public key to authenticate anyone) and `known-hosts`
 # after all hosts are healthy (it captures their identities).
+#
+# Every port is published on 127.0.0.1 only. The fleet is a fixture, not a
+# service: nothing outside this machine should be able to reach its sshd, and the
+# engine dials the same loopback address a developer would.
 
 x-server: &server
   image: shipyard-lab
@@ -57,7 +61,12 @@ services:
   known-hosts:
     <<: *init
     container_name: shipyard-known-hosts
-    # Hosengine cannot use.
+    # Host networking, deliberately. `known_hosts` must be keyed by the address
+    # the client will actually dial, and the engine dials the *host's* loopback
+    # (127.0.0.1:2201). Only the host network namespace sees that address;
+    # scanning shipyard-01:22 over the lab bridge would record a different one and
+    # then have to be rewritten into a lie. Same reason `check` runs here: its
+    # assertions are end-to-end SSH from the host's point of view.
     network_mode: host
     command: [known-hosts]
     depends_on:
@@ -71,7 +80,8 @@ services:
   shipyard-01:
     <<: *server
     container_name: shipyard-01
-    ports: ["2201:22", "8081:80"]
+    hostname: shipyard-01
+    ports: ["127.0.0.1:2201:22", "127.0.0.1:8081:80"]
     volumes:
       [
         ./keys:/keys:ro,
@@ -83,7 +93,8 @@ services:
   shipyard-02:
     <<: *server
     container_name: shipyard-02
-    ports: ["2202:22", "8082:80"]
+    hostname: shipyard-02
+    ports: ["127.0.0.1:2202:22", "127.0.0.1:8082:80"]
     volumes:
       [
         ./keys:/keys:ro,
@@ -95,7 +106,8 @@ services:
   shipyard-03:
     <<: *server
     container_name: shipyard-03
-    ports: ["2203:22", "8083:80"]
+    hostname: shipyard-03
+    ports: ["127.0.0.1:2203:22", "127.0.0.1:8083:80"]
     volumes:
       [
         ./keys:/keys:ro,

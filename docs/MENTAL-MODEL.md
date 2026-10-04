@@ -77,6 +77,47 @@ configured — a project deploys to a single derived unit against a default
 
 ---
 
+### 2.1 `Target` — the engine's view of a server
+
+A `servers` row is database state. A **`Target`** is the value the SSH driver
+receives, and it is the only thing the engine knows about a host it will touch.
+Fixed now, before any Go exists, so Phase 2 writes against a decided shape
+instead of inventing one:
+
+```go
+type Target struct {
+    Name       string // shipyard-01      — display and lookup, never dialed
+    Address    string // 127.0.0.1 (lab), 203.0.113.7 (VPS)
+    Port       int    // 2201 (lab), 22 (VPS)
+    User       string // deploy
+    Identity   string // path to the private key
+    KnownHosts string // path to the file host keys are verified against
+}
+```
+
+Three consequences, all of them load-bearing:
+
+- **No field may encode *how* the target is reached.** Nothing says Docker, lab
+  or VPS. Phase 6 adds a host by inserting a row, not by branching the engine
+  (G4 / A7).
+- **`Address` is the literal dial string, never a name the engine resolves.**
+  OpenSSH matches a host key against the string it was handed, so `localhost` and
+  `127.0.0.1` are *different* keys in `known_hosts` — one entry cannot cover
+  both. And `localhost` resolves through `/etc/hosts`, which is not stable
+  across container images (`::1` first on some). The lab dials `127.0.0.1:2201`
+  and `known_hosts` is keyed `[127.0.0.1]:2201`; the brackets are part of the key
+  because the port is not 22.
+- **There is no host-key column.** One `known_hosts` file holds many targets, one
+  `[address]:port` entry each (`knownhosts.New`, per §8 of
+  `reference/Shipyard build primitives/secrets-and-key-management.md`). A
+  fingerprint per row would duplicate the file and let the two disagree.
+
+`Name` is worth its own field for one reason: it is the join key back to
+`servers` in every log line and every `deployment_events` row. It must never be
+an address, or the audit trail stops being readable after the host is rebuilt.
+
+---
+
 ## 3. The crux: three orthogonal status axes
 
 Most designs collapsed these into one `status` column. That's the bug. There are
@@ -198,7 +239,7 @@ missing mid-build → resume or `failed(build_interrupted)`; no `current` at all
 
 ---
 
-## 5. Decision log (the 12 adjudications)
+## 5. Decision log (the 13 adjudications)
 
 | # | Decision | Rejected | Because |
 |---|---|---|---|
@@ -214,6 +255,14 @@ missing mid-build → resume or `failed(build_interrupted)`; no `current` at all
 | D10 | Keep env + service tables; MVP works without them | "cut to 3 entities" (SRE) | SRE's *spirit* is right (zero-config demo path) but the tables are what make it production-grade |
 | D11 | Claim with inlined enum literals + partial index on `coalesce(lease_expires_at,'-infinity')`; `FOR UPDATE SKIP LOCKED` **inside** the CTE | Param-driven claim; lock outside a CTE | Verified: inlined form → `Index Scan` (O(queue depth)); lock outside CTE → silently not locked |
 | D12 | Status column: `text` + `CHECK` (not native ENUM) | `CREATE TYPE … AS ENUM` | `ALTER TYPE … ADD VALUE` can't run in the same txn that uses the value; enums are forward-only and painful to evolve |
+| D13 | On a target host, every privileged action goes through **one constrained root helper** — stage → validate → install → `nginx -t` → `systemctl restart` — invoked by `deploy` over a fixed sudo allowlist | `deploy` has group write on `/etc/systemd/system` and the nginx site dirs | Writing a unit file and then starting it as root is a root-equivalent primitive wearing a disguise; the allowlist is bypassed entirely by the file write. A helper is the one place that can fail *closed* — bad config never reaches `restart`, which is §8 property 4 — and it is where a privilege boundary belongs in a project whose thesis is safe primitives. The lab still ships the group-write shortcut (Phase 0 needs nothing more); **3.5 replaces it** |
+
+> **The lab's `sudoers-deploy` is not a security boundary, and does not pretend to be.**
+> `deploy` has group write on `/etc/systemd/system`, so it can add a unit and then
+> start it as root. That is unavoidable for the lab's throwaway workflow and fine
+> on a disposable host, and it is *not* a pattern to copy onto a shared or
+> production host. D13 is the shape that replaces it. `make lab-check` asserts the
+> allowlist works, so a broken sudoers file fails in Phase 0 rather than in 3.5.
 
 **The schema does not exist yet — you write it by hand in Phase 2.** An earlier
 agent-produced migration was analysed, found to violate D2, D4, D11, and D12, and

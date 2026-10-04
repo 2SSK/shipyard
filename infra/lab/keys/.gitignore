@@ -1,0 +1,4 @@
+# Written by init.sh: the lab keypair and the host keys captured from the
+# fleet. Both are derived state -- never commit them.
+*
+!.gitignore
